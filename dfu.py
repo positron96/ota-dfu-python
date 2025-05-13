@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
 ------------------------------------------------------------------------------
- DFU Server for Nordic nRF51 based systems.
+ DFU Server for Nordic nRF51/nRF52 based systems.
  Conforms to nRF51_SDK 11.0 BLE_DFU requirements.
 ------------------------------------------------------------------------------
 """
-import os, re
-import sys
-import optparse
+import os
+import argparse
 import time
 import math
 import traceback
@@ -17,73 +16,56 @@ from unpacker import Unpacker
 from ble_secure_dfu_controller import BleDfuControllerSecure
 from ble_legacy_dfu_controller import BleDfuControllerLegacy
 
-def main():
+async def main():
 
     try:
-        parser = optparse.OptionParser(usage='%prog -f <hex_file> -a <dfu_target_address>\n\nExample:\n\tdfu.py -f application.hex -d application.dat -a cd:e3:4a:47:1c:e4',
-                                       version='0.5')
+        parser = argparse.ArgumentParser(
+            description="DFU Server for Nordic nRF51/nRF52 based systems.",
+            usage='%(prog)s -f <hex_file> -a <dfu_target_address>\n\nExample:\n\tdfu.py -f application.hex -d application.dat -a cd:e3:4a:47:1c:e4'
+        )
 
-        parser.add_option('-a', '--address',
-                  action='store',
-                  dest="address",
-                  type="string",
-                  default=None,
-                  help='DFU target address.'
-                  )
+        parser.add_argument('-a', '--address',
+                            type=str,
+                            required=True,
+                            help='DFU target address.')
 
-        parser.add_option('-f', '--file',
-                  action='store',
-                  dest="hexfile",
-                  type="string",
-                  default=None,
-                  help='hex file to be uploaded.'
-                  )
+        parser.add_argument('-f', '--file',
+                            type=str,
+                            dest='hexfile'
+                            help='Hex file to be uploaded.')
 
-        parser.add_option('-d', '--dat',
-                  action='store',
-                  dest="datfile",
-                  type="string",
-                  default=None,
-                  help='dat file to be uploaded.'
-                  )
+        parser.add_argument('-d', '--dat',
+                            type=str,
+                            dest='datfile',
+                            help='DAT file to be uploaded.')
 
-        parser.add_option('-z', '--zip',
-                  action='store',
-                  dest="zipfile",
-                  type="string",
-                  default=None,
-                  help='zip file to be used.'
-                  )
+        parser.add_argument('-z', '--zip',
+                            type=str,
+                            dest=zipfile
+                            help='Zip file to be used.')
 
-        parser.add_option('--secure',
-                  action='store_true',
-                  dest='secure_dfu',
-                  default=True,
-                  help='Use secure bootloader (Nordic SDK > 12)'
-                  )
+        parser.add_argument('--secure',
+                            action='store_true',
+                            default=True,
+                            help='Use secure bootloader (Nordic SDK > 12).')
 
-        parser.add_option('--legacy',
-                  action='store_false',
-                  dest='secure_dfu',
-                  help='Use secure bootloader (Nordic SDK < 12)'
-                  )
+        parser.add_argument('--legacy',
+                            action='store_false',
+                            dest='secure_dfu',
+                            help='Use legacy bootloader (Nordic SDK < 12).')
 
-        parser.add_option('-v', '--verbose',
-                  action='store_true',
-                  dest='verbose',
-                  help=('Increase verbosity. (You can increase verbosity '
-                      'further by manually setting verbose=True at the top '
-                      'of the other .py files.')
-                  )
-        options, args = parser.parse_args()
+        parser.add_argument('-v', '--verbose',
+                            action='store_true',
+                            help='Increase verbosity.')
+
+        options = parser.parse_args()
 
     except Exception as e:
         print(e)
-        print("For help use --help")
-        sys.exit(2)
+        parser.print_help()
+        exit(2)
 
     try:
-
         ''' Validate input parameters '''
 
         if not options.address:
@@ -91,26 +73,24 @@ def main():
             exit(2)
 
         unpacker = None
-        hexfile  = None
-        datfile  = None
+        hexfile = None
+        datfile = None
 
-        if options.zipfile != None:
-
-            if (options.hexfile != None) or (options.datfile != None):
+        if options.zip:
+            if options.hexfile or options.datfile:
                 print("Conflicting input directives")
                 exit(2)
 
             unpacker = Unpacker()
-            #print options.zipfile
             try:
-                hexfile, datfile = unpacker.unpack_zipfile(options.zipfile)	
+                hexfile, datfile = unpacker.unpack_zipfile(options.zipfile)
             except Exception as e:
                 print("ERR")
                 print(e)
                 pass
 
         else:
-            if (not options.hexfile) or (not options.datfile):
+            if not options.hexfile or not options.datfile:
                 parser.print_help()
                 exit(2)
 
@@ -125,9 +105,7 @@ def main():
             hexfile = options.hexfile
             datfile = options.datfile
 
-
         ''' Start of Device Firmware Update processing '''
-
         if options.verbose:
             init_msg = \
 """
@@ -137,9 +115,7 @@ def main():
     ==                            ==
     ================================
 """
-            # print "DFU Server start"
             print(init_msg)
-
 
         if options.secure_dfu:
             ble_dfu = BleDfuControllerSecure(options.address.upper(), hexfile, datfile)
@@ -147,13 +123,13 @@ def main():
             ble_dfu = BleDfuControllerLegacy(options.address.upper(), hexfile, datfile)
 
         # Initialize inputs
-        ble_dfu.input_setup()
+        await ble_dfu.input_setup()
 
         # Connect to peer device. Assume application mode.
-        if ble_dfu.scan_and_connect():
-            if not ble_dfu.check_DFU_mode():
+        if await ble_dfu.scan_and_connect():
+            if not await ble_dfu.check_DFU_mode():
                 print("Need to switch to DFU mode")
-                success = ble_dfu.switch_to_dfu_mode()
+                success = await ble_dfu.switch_to_dfu_mode()
                 if not success:
                     print("Couldn't reconnect")
         else:
@@ -162,24 +138,20 @@ def main():
 
             # Try connection with new address
             print("Couldn't connect, will try DFU MAC")
-            if not ble_dfu.scan_and_connect():
+            if not await ble_dfu.scan_and_connect():
                 raise Exception("Can't connect to device")
 
-        ble_dfu.start()
+        await ble_dfu.start()
 
         # Disconnect from peer device if not done already and clean up.
-        ble_dfu.disconnect()
+        await ble_dfu.disconnect()
 
         # If Unpacker for zipfile used then delete Unpacker
-        if unpacker != None:
-           unpacker.delete()
+        if unpacker is not None:
+            unpacker.delete()
 
     except Exception as e:
-        # print traceback.format_exc()
-        print("Exception at line {}: {}".format(sys.exc_info()[2].tb_lineno, e))
-        pass
-
-    except:
+        print(f"Exception at line {traceback.format_exc()}: {e}")
         pass
 
     if options.verbose:
@@ -191,8 +163,4 @@ def main():
 ------------------------------------------------------------------------------
 """
 if __name__ == '__main__':
-
-    # Do not litter the world with broken .pyc files.
-    sys.dont_write_bytecode = True
-
-    main()
+    asyncio.run(main())
