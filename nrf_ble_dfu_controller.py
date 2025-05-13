@@ -1,32 +1,26 @@
 import os
-import pexpect
+import asyncio
 import re
-
-from abc   import ABCMeta, abstractmethod
+from abc import ABCMeta, abstractmethod
 from array import array
-from util  import *
+from bleak import BleakClient, BleakScanner
+from util import *
 
 verbose = False
 
-# the exchanges will be logged to allow looking back for answers
-# by the device that we missed
-import tempfile
-backlogger = tempfile.NamedTemporaryFile("wb")
-
 class NrfBleDfuController(object, metaclass=ABCMeta):
-    ctrlpt_handle        = 0
-    ctrlpt_cccd_handle   = 0
-    data_handle          = 0
+    ctrlpt_handle = None
+    ctrlpt_cccd_handle = None
+    data_handle = None
 
     pkt_receipt_interval = 10
-    pkt_payload_size     = 20
+    pkt_payload_size = 20
 
-    # --------------------------------------------------------------------------
-    #  Start the firmware update process
-    # --------------------------------------------------------------------------
-    @abstractmethod
-    def start(self):
-        pass
+    def __init__(self, target_mac, firmware_path, datfile_path):
+        self.target_mac = target_mac
+        self.firmware_path = firmware_path
+        self.datfile_path = datfile_path
+        self.client = None
 
     # --------------------------------------------------------------------------
     #  Check if the peripheral is running in bootloader (DFU) or application mode
@@ -54,39 +48,32 @@ class NrfBleDfuController(object, metaclass=ABCMeta):
     #  Wait for a notification and parse the response
     # --------------------------------------------------------------------------
     @abstractmethod
-    def _wait_and_parse_notify(self):
+    async def _wait_and_parse_notify(self):
         pass
-
-    def __init__(self, target_mac, firmware_path, datfile_path):
-        self.target_mac = target_mac
-
-        self.firmware_path = firmware_path
-        self.datfile_path = datfile_path
-
-        self.ble_conn = pexpect.spawn("gatttool -b '%s' -t random --interactive" % target_mac, logfile=backlogger)
-        self.ble_conn.delaybeforesend = 0
 
     # --------------------------------------------------------------------------
     #  Start the firmware update process
     # --------------------------------------------------------------------------
-    def start(self):
-        (_, self.ctrlpt_handle, self.ctrlpt_cccd_handle) = self._get_handles(self.UUID_CONTROL_POINT)
-        (_, self.data_handle, _) = self._get_handles(self.UUID_PACKET)
+    async def start(self):
+        await self.connect()
+
+        self.ctrlpt_handle = self.UUID_CONTROL_POINT
+        self.ctrlpt_cccd_handle = self.UUID_CONTROL_POINT  # CCCD is typically the same as the characteristic handle
+        self.data_handle = self.UUID_PACKET
 
         if verbose:
-            print('Control Point Handle: 0x%04x, CCCD: 0x%04x' % (self.ctrlpt_handle, self.ctrlpt_cccd_handle))
-            print('Packet handle: 0x%04x' % (self.data_handle))
+            print(f"Control Point Handle: {self.ctrlpt_handle}")
+            print(f"Packet Handle: {self.data_handle}")
 
-        # Subscribe to notifications from Control Point characteristic
-        self._enable_notifications(self.ctrlpt_cccd_handle)
+        # Enable notifications from the Control Point characteristic
+        await self._enable_notifications(self.ctrlpt_cccd_handle)
 
         # Set the Packet Receipt Notification interval
         prn = uint16_to_bytes_le(self.pkt_receipt_interval)
-        self._dfu_send_command(Procedures.SET_PRN, prn)
+        await self._dfu_send_command(Procedures.SET_PRN, prn)
 
-        self._dfu_send_init()
-
-        self._dfu_send_image()
+        await self._dfu_send_init()
+        await self._dfu_send_image()
 
     # --------------------------------------------------------------------------
     # Initialize: 
@@ -94,190 +81,128 @@ class NrfBleDfuController(object, metaclass=ABCMeta):
     #    Bin: read binfile into bin_array
     # --------------------------------------------------------------------------
     def input_setup(self):
-        print("Sending file " + os.path.split(self.firmware_path)[1] + " to " + self.target_mac)
+        print(f"Sending file {os.path.split(self.firmware_path)[1]} to {self.target_mac}")
 
-        if self.firmware_path == None:
-            raise Exception("input invalid")
+        if self.firmware_path is None:
+            raise Exception("Input invalid")
 
         name, extent = os.path.splitext(self.firmware_path)
 
         if extent == ".bin":
             self.bin_array = array('B', open(self.firmware_path, 'rb').read())
-
             self.image_size = len(self.bin_array)
-            print("Binary imge size: %d" % self.image_size)
-            print("Binary CRC32: %d" % crc32_unsigned(array_to_hex_string(self.bin_array)))
-
+            print(f"Binary image size: {self.image_size}")
+            print(f"Binary CRC32: {crc32_unsigned(array_to_hex_string(self.bin_array))}")
             return
 
         if extent == ".hex":
             intelhex = IntelHex(self.firmware_path)
             self.bin_array = intelhex.tobinarray()
             self.image_size = len(self.bin_array)
-            print("bin array size: ", self.image_size)
+            print(f"Bin array size: {self.image_size}")
             return
 
-        raise Exception("input invalid")
+        raise Exception("Input invalid")
 
     # --------------------------------------------------------------------------
-    # Perform a scan and connect via gatttool.
+    # Perform a scan and connect via bleak.
     # Will return True if a connection was established, False otherwise
     # --------------------------------------------------------------------------
-    def scan_and_connect(self, timeout=2):
-        if verbose: print("scan_and_connect")
+    async def scan_and_connect(self, timeout=2):
+        if verbose:
+            print("scan_and_connect")
 
-        print("Connecting to %s" % (self.target_mac))
+        print(f"Connecting to {self.target_mac}")
 
-        try:
-            self.ble_conn.expect('\[LE\]>', timeout=timeout)
-        except pexpect.TIMEOUT as e:
-            return False
+        devices = await BleakScanner.discover(timeout=timeout)
+        for device in devices:
+            if device.address == self.target_mac:
+                self.client = BleakClient(self.target_mac)
+                await self.client.connect()
+                if verbose:
+                    print(f"Connected to {self.target_mac}")
+                return True
 
-        self.ble_conn.sendline('connect')
-
-        try:
-            res = self.ble_conn.expect('.*Connection successful.*', timeout=timeout)
-        except pexpect.TIMEOUT as e:
-            return False
-
-        return True
+        print(f"Device {self.target_mac} not found")
+        return False
 
     # --------------------------------------------------------------------------
-    #  Disconnect from the peripheral and close the gatttool connection
+    #  Disconnect from the peripheral
     # --------------------------------------------------------------------------
-    def disconnect(self):
-        self.ble_conn.sendline('exit')
-        self.ble_conn.close()
+    async def disconnect(self):
+        if self.client and self.client.is_connected:
+            await self.client.disconnect()
+            if verbose:
+                print(f"Disconnected from {self.target_mac}")
 
     def target_mac_increase(self, inc):
         self.target_mac = uint_to_mac_string(mac_string_to_uint(self.target_mac) + inc)
 
         # Re-start gatttool with the new address
         self.disconnect()
-        self.ble_conn = pexpect.spawn("gatttool -b '%s' -t random --interactive" % self.target_mac, logfile=backlogger)
-        self.ble_conn.delaybeforesend = 0
+        self.scan_and_connect()
 
     # --------------------------------------------------------------------------
     #  Fetch handles for a given UUID.
     #  Will return a three-tuple: (char handle, value handle, CCCD handle)
     #  Will raise an exception if the UUID is not found
     # --------------------------------------------------------------------------
-    def _get_handles(self, uuid):
-        self.ble_conn.before = ""
-        self.ble_conn.sendline('characteristics')
+    async def _get_handles(self, uuid):
+        if not self.client:
+            raise Exception("Not connected to a device")
 
-        try:
-            self.ble_conn.expect([uuid], timeout=2)
-            handles = re.findall(b'.*handle: (0x....),.*char value handle: (0x....)', self.ble_conn.before)
-            (handle, value_handle) = handles[-1]
-        except pexpect.TIMEOUT as e:
-            raise Exception("UUID not found: {}".format(uuid))
+        services = await self.client.get_services()
+        for service in services:
+            for characteristic in service.characteristics:
+                if characteristic.uuid == uuid:
+                    return (characteristic.handle, characteristic.handle, characteristic.handle + 1)
 
-        return (int(handle, 16), int(value_handle, 16), int(value_handle, 16)+1)
+        raise Exception(f"UUID not found: {uuid}")
 
     # --------------------------------------------------------------------------
     #  Wait for notification to arrive.
-    #  Example format: "Notification handle = 0x0019 value: 10 01 01"
     # --------------------------------------------------------------------------
-    def _dfu_wait_for_notify(self):
-        while True:
-            if verbose: print("dfu_wait_for_notify")
+    async def _dfu_wait_for_notify(self):
+        if verbose:
+            print("dfu_wait_for_notify")
 
-            if not self.ble_conn.isalive():
-                print("connection not alive")
-                return None
-
-            before = self.ble_conn.after
-            try:
-                index = self.ble_conn.expect('Notification handle = .*? \r\n', timeout=30)
-
-            except pexpect.TIMEOUT:
-                #
-                # The gatttool does not report link-lost directly.
-                # The only way found to detect it is monitoring the prompt '[CON]'
-                # and if it goes to '[   ]' this indicates the connection has
-                # been broken.
-                # In order to get a updated prompt string, issue an empty
-                # sendline('').  If it contains the '[   ]' string, then
-                # raise an exception. Otherwise, if not a link-lost condition,
-                # continue to wait.
-                #
-                self.ble_conn.sendline('')
-                string = self.ble_conn.before
-                if b'[   ]' in string:
-                    print('Connection lost! ')
-                    raise Exception('Connection Lost')
-                else:
-                    # the notification might have been sent a bit too
-                    # early, reading the log to make sure:
-                    with open(backlogger.name, "rb") as f:
-                        content = f.read()
-                    if not b"Notification handle = " in content:
-                        # no notification received
-                        return None
-                    else:
-                        # trim the latest message until the notification
-                        while not before.startswith(b"Notification handle ="):
-                            before = before[1:]
-                        hxstr = before.split()[3:]
-                        handle = int(float.fromhex(hxstr[0].decode('UTF-8')))
-                        return hxstr[2:]
-
-            if index == 0:
-                after = self.ble_conn.after
-                hxstr = after.split()[3:]
-                handle = int(float.fromhex(hxstr[0].decode('UTF-8')))
-                return hxstr[2:]
-
-            else:
-                print("unexpeced index: {0}".format(index))
-                return None
+        # bleak handles notifications asynchronously, so this method would
+        # need to wait for the notification handler to process the data.
+        await self.notification_event.wait()
+        self.notification_event.clear()
+        return self.notification_data
 
     # --------------------------------------------------------------------------
     #  Send a procedure + any parameters required
     # --------------------------------------------------------------------------
-    def _dfu_send_command(self, procedure, params=[]):
-        if verbose: print('_dfu_send_command')
+    async def _dfu_send_command(self, procedure, params=[]):
+        if verbose:
+            print('_dfu_send_command')
 
-        cmd  = 'char-write-req 0x%04x %02x' % (self.ctrlpt_handle, procedure)
-        cmd += array_to_hex_string(params)
-
-        if verbose: print(cmd)
-
-        self.ble_conn.sendline(cmd)
+        command = bytearray([procedure] + params)
+        await self.client.write_gatt_char(self.ctrlpt_handle, command)
 
         # Verify that command was successfully written
-        try:
-            res = self.ble_conn.expect('Characteristic value was written successfully.*', timeout=10)
-        except pexpect.TIMEOUT as e:
-            print("State timeout")
+        # ???
 
     # --------------------------------------------------------------------------
     #  Send an array of bytes
     # --------------------------------------------------------------------------
-    def _dfu_send_data(self, data):
-        cmd  = 'char-write-cmd 0x%04x' % (self.data_handle)
-        cmd += ' '
-        cmd += array_to_hex_string(data)
-
-        if verbose: print(cmd)
-
-        self.ble_conn.sendline(cmd)
+    async def _dfu_send_data(self, data):
+        await self.client.write_gatt_char(self.data_handle, bytearray(data))
 
     # --------------------------------------------------------------------------
     #  Enable notifications from the Control Point Handle
     # --------------------------------------------------------------------------
-    def _enable_notifications(self, cccd_handle):
-        if verbose: print('_enable_notifications')
+    async def _enable_notifications(self, cccd_handle):
+        if verbose:
+            print('_enable_notifications')
 
-        cmd  = 'char-write-req 0x%04x %s' % (cccd_handle, '0100')
+        await self.client.start_notify(cccd_handle, self._notification_handler)
 
-        if verbose: print(cmd)
-
-        self.ble_conn.sendline(cmd)
-
-        # Verify that command was successfully written
-        try:
-            res = self.ble_conn.expect('Characteristic value was written successfully.*', timeout=10)
-        except pexpect.TIMEOUT as e:
-            print("State timeout")
+    def _notification_handler(self, sender, data):
+        if verbose:
+            print(f"Notification received from {sender}: {data}")
+        # store data in the class and use asyncio Event to notify
+        self.notification_data = data
+        self.notification_event.set()
