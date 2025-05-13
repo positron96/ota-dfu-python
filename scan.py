@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-
-#------------------------------------------------------------------------------
-# Device scan using bleak
-#------------------------------------------------------------------------------
+"""
+Device scan using bleak.
+"""
 
 import asyncio
 from bleak import BleakScanner
 
-#------------------------------------------------------------------------------
-# Bluetooth LE scan for advertising peripheral devices
-#------------------------------------------------------------------------------
 class BleScanner:
+    """
+    Bluetooth LE scan for advertising peripheral devices.
+    """
 
     def __init__(self, advert_name=None):
         """
@@ -45,30 +44,10 @@ class BleScanner:
         finally:
             print("Scan complete")
 
-#------------------------------------------------------------------------------
-#
-#------------------------------------------------------------------------------
-class Scan:
 
-    def __init__(self, advert_name=None):
-        """
-        Initialize the Scan class with an optional advertisement name filter.
-        """
-        self.advert_name = advert_name
-
-    def scan(self):
-        """
-        Perform the scan using BleScanner.
-        """
-        scanner = BleScanner(self.advert_name)
-        return asyncio.run(scanner.scan())
-
-#------------------------------------------------------------------------------
-#
-#------------------------------------------------------------------------------
 if __name__ == '__main__':
 
-    # scanner = Scan("DfuTarg")  # specific advertisement name
-    scanner = Scan(None)  # any advertising name
+    # scanner = BleScanner("DfuTarg")  # specific advertisement name
+    scanner = BleScanner(None)  # any advertising name    
+    asyncio.run(scanner.scan())
 
-    scanner.scan()

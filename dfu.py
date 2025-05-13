@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-------------------------------------------------------------------------------
- DFU Server for Nordic nRF51/nRF52 based systems.
- Conforms to nRF51_SDK 11.0 BLE_DFU requirements.
-------------------------------------------------------------------------------
+DFU Server for Nordic nRF51/nRF52 based systems.
+
+Conforms to nRF51_SDK 11.0 BLE_DFU requirements.
 """
 import os
 import argparse
 import time
 import math
 import traceback
+import asyncio
 
 from unpacker import Unpacker
 
@@ -31,7 +31,7 @@ async def main():
 
         parser.add_argument('-f', '--file',
                             type=str,
-                            dest='hexfile'
+                            dest='hexfile',
                             help='Hex file to be uploaded.')
 
         parser.add_argument('-d', '--dat',
@@ -41,7 +41,7 @@ async def main():
 
         parser.add_argument('-z', '--zip',
                             type=str,
-                            dest=zipfile
+                            dest=zipfile,
                             help='Zip file to be used.')
 
         parser.add_argument('--secure',
@@ -66,7 +66,7 @@ async def main():
         exit(2)
 
     try:
-        ''' Validate input parameters '''
+        # Validate input parameters
 
         if not options.address:
             parser.print_help()
@@ -105,18 +105,7 @@ async def main():
             hexfile = options.hexfile
             datfile = options.datfile
 
-        ''' Start of Device Firmware Update processing '''
-        if options.verbose:
-            init_msg = \
-"""
-    ================================
-    ==                            ==
-    ==         DFU Server         ==
-    ==                            ==
-    ================================
-"""
-            print(init_msg)
-
+        # Start of Device Firmware Update processing
         if options.secure_dfu:
             ble_dfu = BleDfuControllerSecure(options.address.upper(), hexfile, datfile)
         else:
@@ -157,10 +146,6 @@ async def main():
     if options.verbose:
         print("DFU Server done")
 
-"""
-------------------------------------------------------------------------------
 
-------------------------------------------------------------------------------
-"""
 if __name__ == '__main__':
     asyncio.run(main())
