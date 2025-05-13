@@ -10,6 +10,7 @@ import time
 import math
 import traceback
 import asyncio
+import logging
 
 from unpacker import Unpacker
 
@@ -17,6 +18,8 @@ from ble_secure_dfu_controller import BleDfuControllerSecure
 from ble_legacy_dfu_controller import BleDfuControllerLegacy
 
 async def main():
+
+    logging.basicConfig(level=logging.INFO)
 
     try:
         parser = argparse.ArgumentParser(
@@ -28,7 +31,10 @@ async def main():
                             type=str,
                             required=True,
                             help='DFU target address.')
-
+        parser.add_argument('-u', '--auto-switch',
+                            type=bool,
+                            default=True,
+                            help='Try to switch to DFU')
         parser.add_argument('-f', '--file',
                             type=str,
                             dest='hexfile',
@@ -108,19 +114,24 @@ async def main():
         else:
             ble_dfu = BleDfuControllerLegacy(options.address.upper(), hexfile, datfile)
 
+        ble_dfu.auto_switch = options.auto_switch
+
         # Initialize inputs
         ble_dfu.input_setup()
 
         # Connect to peer device. Assume application mode.
         if await ble_dfu.scan_and_connect():
             if not await ble_dfu.check_DFU_mode():
+                if not options.auto_switch:
+                    print('Not in DFU mode')
+                    return
                 print("Need to switch to DFU mode")
                 success = await ble_dfu.switch_to_dfu_mode()
                 if not success:
                     print("Couldn't reconnect")
         else:
             # The device might already be in DFU mode (MAC + 1)
-            ble_dfu.target_mac_increase(1)
+            await ble_dfu.target_mac_increase(1)
 
             # Try connection with new address
             print("Couldn't connect, will try DFU MAC")

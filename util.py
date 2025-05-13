@@ -3,12 +3,12 @@ import binascii
 import re
 
 def bytes_to_uint32_le(bytes):
-    return  (int(bytes[3], 16) << 24) | (int(bytes[2], 16) << 16) | (int(bytes[1], 16) <<  8) | (int(bytes[0], 16) <<  0)
+    return  (bytes[3] << 24) | (bytes[2] << 16) | (bytes[1] <<  8) | (bytes[0] <<  0)
 
 def uint32_to_bytes_le(uint32):
-    return [(uint32 >> 0)  & 0xff, 
-            (uint32 >> 8)  & 0xff, 
-            (uint32 >> 16) & 0xff, 
+    return [(uint32 >> 0)  & 0xff,
+            (uint32 >> 8)  & 0xff,
+            (uint32 >> 16) & 0xff,
             (uint32 >> 24) & 0xff]
 
 def uint16_to_bytes_le(value):
@@ -29,7 +29,9 @@ def array_to_hex_string(arr):
     return hex_str
 
 def crc32_unsigned(bytestring):
-    return binascii.crc32(bytestring.encode('UTF-8')) % (1 << 32)
+    if isinstance(bytestring, str):
+        bytestring = bytestring.encode('UTF-8')
+    return binascii.crc32(bytestring) % (1 << 32)
 
 def mac_string_to_uint(mac):
     parts = list(re.match('(..):(..):(..):(..):(..):(..)', mac).groups())

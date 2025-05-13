@@ -6,7 +6,7 @@ from array import array
 from bleak import BleakClient, BleakScanner, BleakGATTCharacteristic
 from util import *
 
-verbose = False
+verbose = True
 
 class NrfBleDfuController(object, metaclass=ABCMeta):
     ctrlpt_handle = None
@@ -21,6 +21,9 @@ class NrfBleDfuController(object, metaclass=ABCMeta):
         self.firmware_path = firmware_path
         self.datfile_path = datfile_path
         self.client = None
+        self.auto_switch = True
+        self.notification_event = asyncio.Event()
+        self.notification_data = None
 
     @abstractmethod
     def start(self):
@@ -73,7 +76,8 @@ class NrfBleDfuController(object, metaclass=ABCMeta):
         name, extent = os.path.splitext(self.firmware_path)
 
         if extent == ".bin":
-            self.bin_array = array('B', open(self.firmware_path, 'rb').read())
+            with open(self.firmware_path, 'rb') as f:
+                self.bin_array = f.read()
             self.image_size = len(self.bin_array)
             print(f"Binary image size: {self.image_size}")
             print(f"Binary CRC32: {crc32_unsigned(array_to_hex_string(self.bin_array))}")
@@ -99,14 +103,23 @@ class NrfBleDfuController(object, metaclass=ABCMeta):
         print(f"Connecting to {self.target_mac}")
 
         devices = await BleakScanner.discover(timeout=timeout)
+        dfu_addr = uint_to_mac_string(mac_string_to_uint(self.target_mac) + 1)
         for device in devices:
             if device.address == self.target_mac:
                 self.client = BleakClient(self.target_mac)
                 await self.client.connect()
+                await self._on_connected()
                 if verbose:
                     print(f"Connected to {self.target_mac}")
-                await self._on_connected()
                 return True
+            if device.address == dfu_addr:
+                self.client = BleakClient(dfu_addr)
+                await self.client.connect()
+                await self._on_connected()
+                if verbose:
+                    print(f"Connected to {dfu_addr}")
+                return True
+
 
         print(f"Device {self.target_mac} not found")
         return False
@@ -120,29 +133,13 @@ class NrfBleDfuController(object, metaclass=ABCMeta):
             if verbose:
                 print(f"Disconnected from {self.target_mac}")
 
-    def target_mac_increase(self, inc):
+    async def target_mac_increase(self, inc):
+        await self.disconnect()
         self.target_mac = uint_to_mac_string(mac_string_to_uint(self.target_mac) + inc)
 
         # Re-start gatttool with the new address
-        self.disconnect()
-        self.scan_and_connect()
+        await self.scan_and_connect()
 
-    # --------------------------------------------------------------------------
-    #  Fetch handles for a given UUID.
-    #  Will return a three-tuple: (char handle, value handle, CCCD handle)
-    #  Will raise an exception if the UUID is not found
-    # --------------------------------------------------------------------------
-    async def _get_handles(self, uuid):
-        if not self.client:
-            raise Exception("Not connected to a device")
-
-        services = await self.client.get_services()
-        for service in services:
-            for characteristic in service.characteristics:
-                if characteristic.uuid == uuid:
-                    return (characteristic.handle, characteristic.handle, characteristic.handle + 1)
-
-        raise Exception(f"UUID not found: {uuid}")
 
     # --------------------------------------------------------------------------
     #  Wait for notification to arrive.
@@ -161,10 +158,11 @@ class NrfBleDfuController(object, metaclass=ABCMeta):
     #  Send a procedure + any parameters required
     # --------------------------------------------------------------------------
     async def _dfu_send_command(self, procedure, params=[]):
-        if verbose:
-            print('_dfu_send_command')
 
-        command = bytearray([procedure] + params)
+        command = bytes([procedure] + params)
+        if verbose:
+            print('_dfu_send_command %s', command)
+
         await self.client.write_gatt_char(self.ctrlpt_handle, command)
 
         # Verify that command was successfully written

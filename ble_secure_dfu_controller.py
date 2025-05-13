@@ -1,12 +1,20 @@
 import asyncio
+import math
 import struct
 import os
 
 from array import array
+import time
 from util import *
+
+import logging
+
+from bleak.uuids import normalize_uuid_str
+
 from nrf_ble_dfu_controller import NrfBleDfuController
 
-verbose = False
+logger = logging.getLogger(__file__)
+verbose = True
 
 class Procedures:
     CREATE          = 0x01
@@ -69,6 +77,7 @@ class Results:
 
 
 class BleDfuControllerSecure(NrfBleDfuController):
+    UUID_DFU = normalize_uuid_str("FE59")
     UUID_BUTTONLESS = "8e400001-f315-4f60-9fb8-838830daea50"
     UUID_CONTROL_POINT = "8ec90001-f315-4f60-9fb8-838830daea50"
     UUID_PACKET = "8ec90002-f315-4f60-9fb8-838830daea50"
@@ -79,29 +88,35 @@ class BleDfuControllerSecure(NrfBleDfuController):
         self.packet_uuid = self.UUID_PACKET
 
     async def _on_connected(self):
-        self.service = [s for s in self.client.services if s.uuid.lower() == self.UUID_BUTTONLESS.upper() ].pop()
-
-        chars = { c.uuid.upper(): c for c in self.service.characteristics}
-
-        self.ctrlpt_handle = chars[self.UUID_CONTROL_POINT]
-        self.data_handle = chars[self.UUID_PACKET]
+        pass
 
 
     # --------------------------------------------------------------------------
     #  Start the firmware update process
     # --------------------------------------------------------------------------
     async def start(self):
+        dfus = [s for s in self.client.services if s.uuid.upper() == self.UUID_DFU.upper() ]
+        if not dfus:
+            raise Exception('No DFU service')
+        self.service = dfus[0]
+
+        chars = { c.uuid.upper(): c for c in self.service.characteristics}
+
+        self.ctrlpt_handle = chars[self.UUID_CONTROL_POINT.upper()]
+        self.data_handle = chars[self.UUID_PACKET.upper()]
 
         if verbose:
             print(f"Control Point Handle: {self.ctrlpt_handle}")
             print(f"Packet Handle: {self.data_handle}")
 
         # Enable notifications from the Control Point characteristic
-        await self._enable_notifications(self.ctrlpt_cccd_handle)
+        await self._enable_notifications(self.ctrlpt_handle)
 
         # Set the Packet Receipt Notification interval
         prn = uint16_to_bytes_le(self.pkt_receipt_interval)
         await self._dfu_send_command(Procedures.SET_PRN, prn)
+
+        await self._wait_and_parse_notify()
 
         await self._dfu_send_init()
         await self._dfu_send_image()
@@ -113,54 +128,55 @@ class BleDfuControllerSecure(NrfBleDfuController):
     # --------------------------------------------------------------------------
     async def check_DFU_mode(self):
         """Returns True if already in DFU mode, False otherwise"""
+        print('services = ', [s.uuid for s in self.client.services])
         for s in self.client.services:
-            for c in s.characteristics:
-                if c.uuid.upper() == self.UUID_BUTTONLESS.upper():
-                    return True
+            if s.uuid.upper() == self.UUID_DFU.upper():
+                return True
         return False
 
 
     async def switch_to_dfu_mode(self):
         """Send buttonless DFU mode entry command"""
 
-        await self._enable_notifications(self.ctrlpt_handle)
+        # await self._enable_notifications(self.ctrlpt_handle)
         await self.client.write_gatt_char(self.UUID_BUTTONLESS, b'\x01', response=True)
 
         # Wait some time for board to reboot
         await asyncio.sleep(0.5)
 
         # Increase the mac address by one and reconnect
-        self.target_mac_increase(1)
+        await self.target_mac_increase(1)
         return await self.scan_and_connect()
 
     # --------------------------------------------------------------------------
     #  Parse notification status results
     # --------------------------------------------------------------------------
 
-    def _dfu_parse_notify(self, notify):
+    def _dfu_parse_notify(self, notify: bytes):
         if len(notify) < 3:
             print("notify data length error")
             return None
 
-        if verbose: print(notify)
+        if verbose: print('RX:', notify)
 
-        dfu_notify_opcode = Procedures.from_string(notify[0])
+        dfu_notify_opcode = notify[0]
         if dfu_notify_opcode == Procedures.RESPONSE:
 
-            dfu_procedure = Procedures.from_string(notify[1])
-            dfu_result  = Results.from_string(notify[2])
-
-            procedure_str = Procedures.to_string(dfu_procedure)
-            result_str  = Results.to_string(dfu_result)
+            dfu_procedure = notify[1]
+            dfu_result  = notify[2]
 
             # if verbose: print "opcode: {0}, proc: {1}, res: {2}".format(dfu_notify_opcode, procedure_str, result_str)
-            if verbose: print("opcode: 0x%02x, proc: %s, res: %s" % (dfu_notify_opcode, procedure_str, result_str))
+            logger.info(
+                "0x%02x, proc: %s, res: %s",
+                dfu_notify_opcode, Procedures.to_string(dfu_procedure), Results.to_string(dfu_result))
 
             # Packet Receipt notifications are sent in the exact same format
             # as responses to the CALC_CHECKSUM procedure.
             if(dfu_procedure == Procedures.CALC_CHECKSUM and dfu_result == Results.SUCCESS):
                 offset = bytes_to_uint32_le(notify[3:7])
                 crc32 = bytes_to_uint32_le(notify[7:11])
+
+                logger.info('CALC_CHECKSUM, res:%s, offset:%X, crc:%X', Results.to_string(dfu_result), offset, crc32)
 
                 return (dfu_procedure, dfu_result, offset, crc32)
 
@@ -169,9 +185,12 @@ class BleDfuControllerSecure(NrfBleDfuController):
                 offset = bytes_to_uint32_le(notify[7:11])
                 crc32 = bytes_to_uint32_le(notify[11:15])
 
+                logger.info('SELECT, res:%s, max_size:%s, offset:%X, crc:%X', Results.to_string(dfu_result), max_size, offset, crc32)
+
                 return (dfu_procedure, dfu_result, max_size, offset, crc32)
 
             else:
+                logger.info('%s, res:%s', Procedures.to_string(dfu_procedure), Results.to_string(dfu_result))
                 return (dfu_procedure, dfu_result)
         # op, result = notify[0], notify[1]
         # if result != Results.SUCCESS:
@@ -199,8 +218,6 @@ class BleDfuControllerSecure(NrfBleDfuController):
         if notify is None:
             raise Exception("No notification received")
 
-        if verbose: print("Parsing notification")
-
         result = self._dfu_parse_notify(notify)
         if result[1] != Results.SUCCESS:
             raise Exception("Error in {} procedure, reason: {}".format(
@@ -213,7 +230,8 @@ class BleDfuControllerSecure(NrfBleDfuController):
     #  Send the Init info (*.dat file contents) to peripheral device.
     # --------------------------------------------------------------------------
     async def _dfu_send_init(self):
-        init_bin_array = array(open(self.datfile_path, 'rb').read())
+        with open(self.datfile_path, 'rb') as df:
+            init_bin_array = df.read()
         init_size = len(init_bin_array)
         init_crc = 0
 
@@ -260,6 +278,7 @@ class BleDfuControllerSecure(NrfBleDfuController):
         num_objects = int(math.ceil(self.image_size / float(max_size)))
         print("Max object size: %d, num objects: %d, offset: %d, total size: %d" % (max_size, num_objects, offset, self.image_size))
 
+        time_start = time.time()
         obj_offset = (offset // max_size) * max_size
         while obj_offset < self.image_size:
             obj_offset += await self._dfu_send_object(obj_offset, max_size)
@@ -298,14 +317,16 @@ class BleDfuControllerSecure(NrfBleDfuController):
                 if (segment_count % self.pkt_receipt_interval) == 0:
                     try:
                         (proc, res, offset, crc32) = await self._wait_and_parse_notify()
-                    except e:
-                        # Likely no notification received, need to re-transmit object
+                    except Exception as e:
+                        logger.warning('err, need to re-transmit object, %s', e)
                         return 0
 
                     if res != Results.SUCCESS:
                         raise Exception("bad notification status: {}".format(Results.to_string(res)))
 
-                    if crc32 != crc32_unsigned(self.bin_array[0:offset]):
+                    local_crc = crc32_unsigned(self.bin_array[0:offset])
+                    if crc32 != local_crc:
+                        logger.warning('crc mismatch: %X != %X', crc32, local_crc)
                         # Something went wrong, need to re-transmit this object
                         return 0
 
@@ -314,8 +335,9 @@ class BleDfuControllerSecure(NrfBleDfuController):
             # Calculate CRC
             await self._dfu_send_command(Procedures.CALC_CHECKSUM)
             _, _, offset, crc32 = await self._wait_and_parse_notify()
-            if(crc32 != crc32_unsigned(self.bin_array[0:offset])):
-                # Need to re-transmit object
+            local_crc = crc32_unsigned(self.bin_array[0:offset])
+            if(crc32 != local_crc):
+                logger.warning('crc mismatch: %X != %X', crc32, local_crc)
                 return 0
         # Execute command
         await self._dfu_send_command(Procedures.EXECUTE)
