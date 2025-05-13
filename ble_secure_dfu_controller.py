@@ -78,6 +78,34 @@ class BleDfuControllerSecure(NrfBleDfuController):
         self.ctrlpt_uuid = self.UUID_CONTROL_POINT
         self.packet_uuid = self.UUID_PACKET
 
+    async def _on_connected(self):
+        self.service = [s for s in self.client.services if s.uuid.lower() == self.UUID_BUTTONLESS.upper() ].pop()
+
+        chars = { c.uuid.upper(): c for c in self.service.characteristics}
+
+        self.ctrlpt_handle = chars[self.UUID_CONTROL_POINT]
+        self.data_handle = chars[self.UUID_PACKET]
+
+
+    # --------------------------------------------------------------------------
+    #  Start the firmware update process
+    # --------------------------------------------------------------------------
+    async def start(self):
+
+        if verbose:
+            print(f"Control Point Handle: {self.ctrlpt_handle}")
+            print(f"Packet Handle: {self.data_handle}")
+
+        # Enable notifications from the Control Point characteristic
+        await self._enable_notifications(self.ctrlpt_cccd_handle)
+
+        # Set the Packet Receipt Notification interval
+        prn = uint16_to_bytes_le(self.pkt_receipt_interval)
+        await self._dfu_send_command(Procedures.SET_PRN, prn)
+
+        await self._dfu_send_init()
+        await self._dfu_send_image()
+
 
     # --------------------------------------------------------------------------
     #  Check if the peripheral is running in bootloader (DFU) or application mode
@@ -85,15 +113,17 @@ class BleDfuControllerSecure(NrfBleDfuController):
     # --------------------------------------------------------------------------
     async def check_DFU_mode(self):
         """Returns True if already in DFU mode, False otherwise"""
-        async with self.client:
-            services = await self.client.get_services()
-            return self.UUID_BUTTONLESS not in [s.uuid for s in services.characteristics]
+        for s in self.client.services:
+            for c in s.characteristics:
+                if c.uuid.upper() == self.UUID_BUTTONLESS.upper():
+                    return True
+        return False
 
 
     async def switch_to_dfu_mode(self):
         """Send buttonless DFU mode entry command"""
 
-        await self._enable_notifications(bl_cccd_handle)
+        await self._enable_notifications(self.ctrlpt_handle)
         await self.client.write_gatt_char(self.UUID_BUTTONLESS, b'\x01', response=True)
 
         # Wait some time for board to reboot

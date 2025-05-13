@@ -3,7 +3,7 @@ import asyncio
 import re
 from abc import ABCMeta, abstractmethod
 from array import array
-from bleak import BleakClient, BleakScanner
+from bleak import BleakClient, BleakScanner, BleakGATTCharacteristic
 from util import *
 
 verbose = False
@@ -21,6 +21,10 @@ class NrfBleDfuController(object, metaclass=ABCMeta):
         self.firmware_path = firmware_path
         self.datfile_path = datfile_path
         self.client = None
+
+    @abstractmethod
+    def start(self):
+        pass
 
     # --------------------------------------------------------------------------
     #  Check if the peripheral is running in bootloader (DFU) or application mode
@@ -51,33 +55,13 @@ class NrfBleDfuController(object, metaclass=ABCMeta):
     async def _wait_and_parse_notify(self):
         pass
 
-    # --------------------------------------------------------------------------
-    #  Start the firmware update process
-    # --------------------------------------------------------------------------
-    async def start(self):
-        await self.connect()
-
-        self.ctrlpt_handle = self.UUID_CONTROL_POINT
-        self.ctrlpt_cccd_handle = self.UUID_CONTROL_POINT  # CCCD is typically the same as the characteristic handle
-        self.data_handle = self.UUID_PACKET
-
-        if verbose:
-            print(f"Control Point Handle: {self.ctrlpt_handle}")
-            print(f"Packet Handle: {self.data_handle}")
-
-        # Enable notifications from the Control Point characteristic
-        await self._enable_notifications(self.ctrlpt_cccd_handle)
-
-        # Set the Packet Receipt Notification interval
-        prn = uint16_to_bytes_le(self.pkt_receipt_interval)
-        await self._dfu_send_command(Procedures.SET_PRN, prn)
-
-        await self._dfu_send_init()
-        await self._dfu_send_image()
+    @abstractmethod
+    async def _on_connected(self):
+        pass
 
     # --------------------------------------------------------------------------
-    # Initialize: 
-    #    Hex: read and convert hexfile into bin_array 
+    # Initialize:
+    #    Hex: read and convert hexfile into bin_array
     #    Bin: read binfile into bin_array
     # --------------------------------------------------------------------------
     def input_setup(self):
@@ -108,7 +92,7 @@ class NrfBleDfuController(object, metaclass=ABCMeta):
     # Perform a scan and connect via bleak.
     # Will return True if a connection was established, False otherwise
     # --------------------------------------------------------------------------
-    async def scan_and_connect(self, timeout=2):
+    async def scan_and_connect(self, timeout=10):
         if verbose:
             print("scan_and_connect")
 
@@ -121,6 +105,7 @@ class NrfBleDfuController(object, metaclass=ABCMeta):
                 await self.client.connect()
                 if verbose:
                     print(f"Connected to {self.target_mac}")
+                await self._on_connected()
                 return True
 
         print(f"Device {self.target_mac} not found")
@@ -192,13 +177,13 @@ class NrfBleDfuController(object, metaclass=ABCMeta):
         await self.client.write_gatt_char(self.data_handle, bytearray(data))
 
     # --------------------------------------------------------------------------
-    #  Enable notifications from the Control Point Handle
+    #  Enable notifications from Characteristic
     # --------------------------------------------------------------------------
-    async def _enable_notifications(self, cccd_handle):
+    async def _enable_notifications(self, ch: BleakGATTCharacteristic):
         if verbose:
             print('_enable_notifications')
 
-        await self.client.start_notify(cccd_handle, self._notification_handler)
+        await self.client.start_notify(ch, self._notification_handler)
 
     def _notification_handler(self, sender, data):
         if verbose:

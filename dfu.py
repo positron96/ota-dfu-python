@@ -41,7 +41,7 @@ async def main():
 
         parser.add_argument('-z', '--zip',
                             type=str,
-                            dest=zipfile,
+                            dest='zipfile',
                             help='Zip file to be used.')
 
         parser.add_argument('--secure',
@@ -61,24 +61,20 @@ async def main():
         options = parser.parse_args()
 
     except Exception as e:
-        print(e)
-        parser.print_help()
+        parser.print_usage()
         exit(2)
+
+    unpacker = None
 
     try:
         # Validate input parameters
-
-        if not options.address:
-            parser.print_help()
-            exit(2)
-
-        unpacker = None
         hexfile = None
         datfile = None
 
-        if options.zip:
+        if options.zipfile:
             if options.hexfile or options.datfile:
-                print("Conflicting input directives")
+                print("Cannot use ZIP file with HEX or DAT file.")
+                parser.print_usage()
                 exit(2)
 
             unpacker = Unpacker()
@@ -91,11 +87,12 @@ async def main():
 
         else:
             if not options.hexfile or not options.datfile:
+                print('HEX file and DAT file are needed.')
                 parser.print_help()
                 exit(2)
 
             if not os.path.isfile(options.hexfile):
-                print("Error: Hex file doesn't exist")
+                print("Error: HEX file doesn't exist")
                 exit(2)
 
             if not os.path.isfile(options.datfile):
@@ -112,7 +109,7 @@ async def main():
             ble_dfu = BleDfuControllerLegacy(options.address.upper(), hexfile, datfile)
 
         # Initialize inputs
-        await ble_dfu.input_setup()
+        ble_dfu.input_setup()
 
         # Connect to peer device. Assume application mode.
         if await ble_dfu.scan_and_connect():
@@ -135,16 +132,15 @@ async def main():
         # Disconnect from peer device if not done already and clean up.
         await ble_dfu.disconnect()
 
+    except Exception as e:
+        print(f"Exception at line {traceback.format_exc()}: {e}")
+    finally:
         # If Unpacker for zipfile used then delete Unpacker
         if unpacker is not None:
             unpacker.delete()
 
-    except Exception as e:
-        print(f"Exception at line {traceback.format_exc()}: {e}")
-        pass
-
-    if options.verbose:
-        print("DFU Server done")
+        if options.verbose:
+            print("DFU Server done")
 
 
 if __name__ == '__main__':
