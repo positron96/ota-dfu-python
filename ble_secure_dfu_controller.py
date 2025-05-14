@@ -2,6 +2,8 @@ import asyncio
 import math
 
 import time
+
+import bleak
 from util import *
 
 import logging
@@ -106,8 +108,8 @@ class BleDfuControllerSecure(NrfBleDfuController):
 
         # Set the Packet Receipt Notification interval
         prn = uint16_to_bytes_le(self.pkt_receipt_interval)
-        await self._dfu_send_command(Procedures.SET_PRN, prn)
 
+        await self._dfu_send_command(Procedures.SET_PRN, prn)
         await self._wait_and_parse_notify()
 
         await self._dfu_send_init()
@@ -126,11 +128,15 @@ class BleDfuControllerSecure(NrfBleDfuController):
                 return True
         return False
 
-
     async def switch_to_dfu_mode(self):
         """Send buttonless DFU mode entry command"""
 
-        await self.client.write_gatt_char(self.UUID_BUTTONLESS, b'\x01', response=True)
+        try:
+            await self.client.write_gatt_char(
+                self.UUID_BUTTONLESS, b'\x01', response=True)
+        except bleak.BleakError:
+            logger.exception('Switching to DFU failed')
+            return False
 
         # Wait some time for board to reboot
         await asyncio.sleep(0.5)
@@ -147,28 +153,41 @@ class BleDfuControllerSecure(NrfBleDfuController):
             logger.error("notify data length error")
             return None
 
-        # Packet Receipt notifications are sent in the exact same format
-        # as responses to the CALC_CHECKSUM procedure.
-        op, result = notif[0], notif[1]
-        logger.debug('RX: %s, %s=%s', notif, Procedures.to_string(op), Results.to_string(result))
+        logger.debug('RX: %s', notif)
 
-        if result != Results.SUCCESS:
-            raise Exception(f"DFU failed with result code {Results.to_string(result)}")
-        if op == Procedures.RESPONSE:
+        opcode = notif[0]
+        if opcode == Procedures.RESPONSE:
 
-            cmd = notif[2]
-            if cmd == Procedures.SELECT:
-                max_size = int.from_bytes(notif[4:8], 'little')
-                offset = int.from_bytes(notif[8:12], 'little')
-                crc = int.from_bytes(notif[12:16], 'little')
-                return (Procedures.SELECT, Results.SUCCESS, max_size, offset, crc)
-            elif cmd == Procedures.CALC_CHECKSUM:
-                offset = int.from_bytes(notif[4:8], 'little')
-                crc = int.from_bytes(notif[8:12], 'little')
-                return (Procedures.CALC_CHECKSUM, Results.SUCCESS, offset, crc)
-            return (Procedures.RESPONSE, Results.SUCCESS)
-        
-        return None
+            proc = notif[1]
+            res = notif[2]
+
+            logger.debug(
+                "RESPONSE for %s = %s",
+                Procedures.to_string(proc),
+                Results.to_string(res))
+
+            # Packet Receipt notifications are sent in the exact same format
+            # as responses to the CALC_CHECKSUM procedure.
+            if (proc == Procedures.CALC_CHECKSUM and res == Results.SUCCESS):
+                offset = bytes_to_uint32_le(notif[3:7])
+                crc32 = bytes_to_uint32_le(notif[7:11])
+
+                logger.debug('CALC_CHECKSUM, res:%s, offset:%X, crc:%X', Results.to_string(res), offset, crc32)
+
+                return (proc, res, offset, crc32)
+
+            elif(proc == Procedures.SELECT and res == Results.SUCCESS):
+                max_size = bytes_to_uint32_le(notif[3:7])
+                offset = bytes_to_uint32_le(notif[7:11])
+                crc32 = bytes_to_uint32_le(notif[11:15])
+
+                logger.debug('SELECT, res:%s, max_size:%s, offset:%X, crc:%X', Results.to_string(res), max_size, offset, crc32)
+
+                return (proc, res, max_size, offset, crc32)
+
+            else:
+                logger.debug('%s, res:%s', Procedures.to_string(proc), Results.to_string(res))
+                return (proc, res)
 
 
     async def _dfu_send_init(self):
@@ -276,13 +295,13 @@ class BleDfuControllerSecure(NrfBleDfuController):
                         # Something went wrong, need to re-transmit this object
                         return 0
 
-                    print_progress(offset, self.image_size, barLength = 50)
+                    print_progress(offset, self.image_size)
 
             # Calculate CRC
             await self._dfu_send_command(Procedures.CALC_CHECKSUM)
             _, _, offset, crc32 = await self._wait_and_parse_notify()
             local_crc = crc32_unsigned(self.bin_array[0:offset])
-            if(crc32 != local_crc):
+            if crc32 != local_crc:
                 logger.warning('crc mismatch: %X != %X', crc32, local_crc)
                 return 0
         # Execute command

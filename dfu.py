@@ -68,7 +68,11 @@ async def main():
 
         options = parser.parse_args()
 
+        if options.verbose:
+            logging.getLogger().setLevel(logging.DEBUG)
+
     except Exception as e:
+        logger.exception('Argument error')
         parser.print_usage()
         exit(2)
 
@@ -88,7 +92,7 @@ async def main():
             unpacker = Unpacker()
             try:
                 hexfile, datfile = unpacker.unpack_zipfile(options.zipfile)
-            except Exception as e:
+            except Exception:
                 logger.error('Error unpacking ZIP file', exc_info=True)
 
         else:
@@ -120,42 +124,44 @@ async def main():
         dfu_addr = ble_dfu.dfu_mac()
 
         device = await BleakScanner.find_device_by_filter(
-            lambda d: d.address == ble_dfu.target_mac or d.address == dfu_addr,
+            lambda d, _: d.address == ble_dfu.target_mac or d.address == dfu_addr,
             timeout=10,
         )
 
         if device is None:
             logger.error('Devices not found')
             return False
-        
+
         if device.address != ble_dfu.target_mac:
             logger.info(f"Device address changed to {device.address}")
-            ble_dfu.target_mac = device.address            
+            ble_dfu.target_mac = device.address
 
         # Connect to peer device.
-        if await ble_dfu.connect():
-            if not await ble_dfu.check_dfu_mode():
-                logger.info('Device not in DFU mode')
-                if not options.auto_switch:
-                    logger.info('Auto switch to DFU mode disabled')
-                    return
-                success = await ble_dfu.switch_to_dfu_mode()
-                if not success:
-                    logger.error("Couldn't reconnect")
-        
+        if not await ble_dfu.connect():
+            logger.error('Could not connect!')
+            return
+
+        if not await ble_dfu.check_dfu_mode():
+            logger.info('Device not in DFU mode')
+            if not options.auto_switch:
+                logger.info('Auto switch to DFU mode disabled')
+                return
+            success = await ble_dfu.switch_to_dfu_mode()
+            if not success:
+                logger.error("Couldn't switch")
+                return
+
         await ble_dfu.start()
 
+    except Exception:
+        logger.exception('Error during DFU process')
+    finally:
         # Disconnect from peer device if not done already and clean up.
         await ble_dfu.disconnect()
 
-    except Exception as e:
-        logger.exception('Error during DFU process')
-    finally:
         # If Unpacker for zipfile used then delete Unpacker
         if unpacker is not None:
             unpacker.delete()
-
-        logger.debug('DFU Server done')
 
 
 if __name__ == '__main__':

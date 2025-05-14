@@ -97,21 +97,29 @@ class NrfBleDfuController(object, metaclass=ABCMeta):
         if not device:
             logger.warning(f"Device {self.target_mac} not found")
             return False
-        
+
         return await self.connect(timeout=timeout)
-        
+
     async def connect(self, timeout=10):
         ''' Connect to the peripheral. '''
         logger.info('Connecting to %s', self.target_mac)
 
         self.client = BleakClient(self.target_mac, timeout=timeout)
-        await self.client.connect()
-        
+        try:
+            await self.client.connect(timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.error('Timeout connecting')
+            return False
+        except Exception as e:
+            logger.error(str(e))
+            return False
+
         if not self.client.is_connected:
             logger.warning('Device %s not connected', self.target_mac)
             return False
-        
+
         await self._on_connected()
+        return True
 
     async def disconnect(self):
         ''' Disconnect from the peripheral. '''
@@ -125,14 +133,14 @@ class NrfBleDfuController(object, metaclass=ABCMeta):
         return uint_to_mac_string(mac_string_to_uint(self.target_mac) + inc)
 
     async def target_mac_increase_and_connect(self, inc=1):
-        ''' 
+        '''
         Increase the target MAC address by 1 and try to connect to it.
-         
+
         This is used to switch from application mode to DFU mode.
         The DFU MAC address is the target MAC + 1.
         '''
         await self.disconnect()
-        self.target_mac = self.dfu_mac(inc)        
+        self.target_mac = self.dfu_mac(inc)
         await self.connect()
 
 
@@ -158,16 +166,12 @@ class NrfBleDfuController(object, metaclass=ABCMeta):
 
         await self.client.write_gatt_char(self.ctrlpt_handle, command)
 
-
     async def _dfu_send_data(self, data: bytes):
         '''Send an array of bytes.'''
         await self.client.write_gatt_char(self.data_handle, data)
 
-
     async def _wait_and_parse_notify(self):
         '''Wait for a notification and parse the response.'''
-
-        logger.debug('Waiting for notification')
         notif = await self._dfu_wait_for_notify()
 
         if notif is None:
