@@ -11,7 +11,6 @@ logger = logging.getLogger(__name__)
 
 class NrfBleDfuController(object, metaclass=ABCMeta):
     ctrlpt_handle = None
-    ctrlpt_cccd_handle = None
     data_handle = None
 
     pkt_receipt_interval = 10
@@ -27,47 +26,37 @@ class NrfBleDfuController(object, metaclass=ABCMeta):
 
     @abstractmethod
     def start(self):
-        pass
-
-    # --------------------------------------------------------------------------
-    #  Check if the peripheral is running in bootloader (DFU) or application mode
-    #  Returns True if the peripheral is in DFU mode
-    # --------------------------------------------------------------------------
-    @abstractmethod
-    def check_DFU_mode(self):
+        '''Start the firmware update process.'''
         pass
 
     @abstractmethod
-    # --------------------------------------------------------------------------
-    #  Switch from application to bootloader (DFU)
-    # --------------------------------------------------------------------------
+    def check_dfu_mode(self):
+        '''
+        Check if the peripheral is running in bootloader (DFU) or application mode.
+        Returns True if the peripheral is in DFU mode
+        '''
+        pass
+
+    @abstractmethod
     def switch_to_dfu_mode(self):
+        '''Switch from application to bootloader (DFU).'''
         pass
 
-    # --------------------------------------------------------------------------
-    #  Parse notification status results
-    # --------------------------------------------------------------------------
     @abstractmethod
     def _dfu_parse_notify(self, notify):
-        pass
-
-    # --------------------------------------------------------------------------
-    #  Wait for a notification and parse the response
-    # --------------------------------------------------------------------------
-    @abstractmethod
-    async def _wait_and_parse_notify(self):
+        '''Parse notification status results'''
         pass
 
     @abstractmethod
     async def _on_connected(self):
         pass
 
-    # --------------------------------------------------------------------------
-    # Initialize:
-    #    Hex: read and convert hexfile into bin_array
-    #    Bin: read binfile into bin_array
-    # --------------------------------------------------------------------------
     def input_setup(self):
+        '''
+        Initialize:
+            Hex: read and convert hexfile into bin_array
+            Bin: read binfile into bin_array
+        '''
         logger.info('Sending file %s to %s', os.path.split(self.firmware_path)[1], self.target_mac)
 
         if self.firmware_path is None:
@@ -100,77 +89,95 @@ class NrfBleDfuController(object, metaclass=ABCMeta):
     async def scan_and_connect(self, timeout=10):
         logger.info('Connecting to %s', self.target_mac)
 
-        devices = await BleakScanner.discover(timeout=timeout)
-        dfu_addr = uint_to_mac_string(mac_string_to_uint(self.target_mac) + 1)
-        for device in devices:
-            if device.address == self.target_mac:
-                self.client = BleakClient(self.target_mac)
-                await self.client.connect()
-                await self._on_connected()
-                logger.debug('Connected to %s', self.target_mac)
-                return True
-            if device.address == dfu_addr:
-                self.client = BleakClient(dfu_addr)
-                await self.client.connect()
-                await self._on_connected()
-                logger.debug('Connected to %s', dfu_addr)
-                return True
+        device = await BleakScanner.find_device_by_address(
+            self.target_mac,
+            timeout=timeout,
+        )
 
+        if not device:
+            logger.warning(f"Device {self.target_mac} not found")
+            return False
+        
+        return await self.connect(timeout=timeout)
+        
+    async def connect(self, timeout=10):
+        ''' Connect to the peripheral. '''
+        logger.info('Connecting to %s', self.target_mac)
 
-        logger.warning(f"Device {self.target_mac} not found")
-        return False
+        self.client = BleakClient(self.target_mac, timeout=timeout)
+        await self.client.connect()
+        
+        if not self.client.is_connected:
+            logger.warning('Device %s not connected', self.target_mac)
+            return False
+        
+        await self._on_connected()
 
-    # --------------------------------------------------------------------------
-    #  Disconnect from the peripheral
-    # --------------------------------------------------------------------------
     async def disconnect(self):
+        ''' Disconnect from the peripheral. '''
+
         if self.client and self.client.is_connected:
             await self.client.disconnect()
             logger.debug('Disconnected from %s', self.target_mac)
 
-    async def target_mac_increase(self, inc):
+    def dfu_mac(self, inc=1):
+        ''' Return the DFU MAC address. This is the target MAC + 1. '''
+        return uint_to_mac_string(mac_string_to_uint(self.target_mac) + inc)
+
+    async def target_mac_increase_and_connect(self, inc=1):
+        ''' 
+        Increase the target MAC address by 1 and try to connect to it.
+         
+        This is used to switch from application mode to DFU mode.
+        The DFU MAC address is the target MAC + 1.
+        '''
         await self.disconnect()
-        self.target_mac = uint_to_mac_string(mac_string_to_uint(self.target_mac) + inc)
-
-        # Re-start gatttool with the new address
-        await self.scan_and_connect()
+        self.target_mac = self.dfu_mac(inc)        
+        await self.connect()
 
 
-    # --------------------------------------------------------------------------
-    #  Wait for notification to arrive.
-    # --------------------------------------------------------------------------
-    async def _dfu_wait_for_notify(self):
+    async def _dfu_wait_for_notify(self, timeout=10):
+        '''Wait for notification to arrive.'''
+
         logger.debug("dfu_wait_for_notify")
 
-        # bleak handles notifications asynchronously, so this method would
-        # need to wait for the notification handler to process the data.
-        await self.notification_event.wait()
+        try:
+            await asyncio.wait_for(self.notification_event.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return None
         self.notification_event.clear()
         return self.notification_data
 
-    # --------------------------------------------------------------------------
-    #  Send a procedure + any parameters required
-    # --------------------------------------------------------------------------
     async def _dfu_send_command(self, procedure, params=[]):
+        '''
+        Send a procedure + any parameters required.
+        '''
 
         command = bytes([procedure] + params)
         logger.debug('_dfu_send_command %s', command)
 
         await self.client.write_gatt_char(self.ctrlpt_handle, command)
 
-        # Verify that command was successfully written
-        # ???
 
-    # --------------------------------------------------------------------------
-    #  Send an array of bytes
-    # --------------------------------------------------------------------------
-    async def _dfu_send_data(self, data):
-        await self.client.write_gatt_char(self.data_handle, bytearray(data))
+    async def _dfu_send_data(self, data: bytes):
+        '''Send an array of bytes.'''
+        await self.client.write_gatt_char(self.data_handle, data)
 
-    # --------------------------------------------------------------------------
-    #  Enable notifications from Characteristic
-    # --------------------------------------------------------------------------
+
+    async def _wait_and_parse_notify(self):
+        '''Wait for a notification and parse the response.'''
+
+        logger.debug('Waiting for notification')
+        notif = await self._dfu_wait_for_notify()
+
+        if notif is None:
+            raise Exception("No notification received")
+
+        result = self._dfu_parse_notify(notif)
+        return result
+
     async def _enable_notifications(self, char: BleakGATTCharacteristic):
+        '''Enable notifications from Characteristic.'''
         logger.debug('_enable_notifications')
 
         await self.client.start_notify(char, self._notification_handler)

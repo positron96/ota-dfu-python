@@ -181,7 +181,7 @@ class BleDfuControllerLegacy(NrfBleDfuController):
     #  Check if the peripheral is running in bootloader (DFU) or application mode
     #  Returns True if the peripheral is in DFU mode
     # --------------------------------------------------------------------------
-    async def check_DFU_mode(self):
+    async def check_dfu_mode(self):
         if verbose: print("Checking DFU State...")
 
         services = await self.client.get_services()

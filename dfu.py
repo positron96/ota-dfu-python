@@ -10,6 +10,8 @@ import traceback
 import asyncio
 import logging
 
+from bleak import BleakScanner
+
 from unpacker import Unpacker
 
 from ble_secure_dfu_controller import BleDfuControllerSecure
@@ -115,25 +117,32 @@ async def main():
         # Initialize inputs
         ble_dfu.input_setup()
 
-        # Connect to peer device. Assume application mode.
-        if await ble_dfu.scan_and_connect():
-            if not await ble_dfu.check_DFU_mode():
+        dfu_addr = ble_dfu.dfu_mac()
+
+        device = await BleakScanner.find_device_by_filter(
+            lambda d: d.address == ble_dfu.target_mac or d.address == dfu_addr,
+            timeout=10,
+        )
+
+        if device is None:
+            logger.error('Devices not found')
+            return False
+        
+        if device.address != ble_dfu.target_mac:
+            logger.info(f"Device address changed to {device.address}")
+            ble_dfu.target_mac = device.address            
+
+        # Connect to peer device.
+        if await ble_dfu.connect():
+            if not await ble_dfu.check_dfu_mode():
+                logger.info('Device not in DFU mode')
                 if not options.auto_switch:
-                    logger.info('Device not in DFU mode')
+                    logger.info('Auto switch to DFU mode disabled')
                     return
-                logger.info("Need to switch to DFU mode")                
                 success = await ble_dfu.switch_to_dfu_mode()
                 if not success:
                     logger.error("Couldn't reconnect")
-        else:
-            # The device might already be in DFU mode (MAC + 1)
-            await ble_dfu.target_mac_increase(1)
-
-            # Try connection with new address
-            logger.info("Couldn't connect, will try DFU MAC")
-            if not await ble_dfu.scan_and_connect():
-                raise Exception("Can't connect to device")
-
+        
         await ble_dfu.start()
 
         # Disconnect from peer device if not done already and clean up.

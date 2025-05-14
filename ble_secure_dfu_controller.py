@@ -88,9 +88,6 @@ class BleDfuControllerSecure(NrfBleDfuController):
         pass
 
 
-    # --------------------------------------------------------------------------
-    #  Start the firmware update process
-    # --------------------------------------------------------------------------
     async def start(self):
         dfus = [s for s in self.client.services if s.uuid.upper() == self.UUID_DFU.upper() ]
         if not dfus:
@@ -102,10 +99,9 @@ class BleDfuControllerSecure(NrfBleDfuController):
         self.ctrlpt_handle = chars[self.UUID_CONTROL_POINT.upper()]
         self.data_handle = chars[self.UUID_PACKET.upper()]
 
-        logger.debug('Control Point Handle: %s', self.ctrlpt_handle)
-        logger.debug('Packet Handle: %s', self.data_handle)
+        logger.debug('Control Point Char: %s', self.ctrlpt_handle)
+        logger.debug('Packet Char: %s', self.data_handle)
 
-        # Enable notifications from the Control Point characteristic
         await self._enable_notifications(self.ctrlpt_handle)
 
         # Set the Packet Receipt Notification interval
@@ -122,7 +118,7 @@ class BleDfuControllerSecure(NrfBleDfuController):
     #  Check if the peripheral is running in bootloader (DFU) or application mode
     #  Returns True if the peripheral is in DFU mode
     # --------------------------------------------------------------------------
-    async def check_DFU_mode(self):
+    async def check_dfu_mode(self):
         """Returns True if already in DFU mode, False otherwise"""
         logger.debug('Services in device: %s', [s.uuid for s in self.client.services])
         for s in self.client.services:
@@ -134,15 +130,13 @@ class BleDfuControllerSecure(NrfBleDfuController):
     async def switch_to_dfu_mode(self):
         """Send buttonless DFU mode entry command"""
 
-        # await self._enable_notifications(self.ctrlpt_handle)
         await self.client.write_gatt_char(self.UUID_BUTTONLESS, b'\x01', response=True)
 
         # Wait some time for board to reboot
         await asyncio.sleep(0.5)
 
         # Increase the mac address by one and reconnect
-        await self.target_mac_increase(1)
-        return await self.scan_and_connect()
+        return await self.target_mac_increase_and_connect(1)
 
     # --------------------------------------------------------------------------
     #  Parse notification status results
@@ -176,19 +170,6 @@ class BleDfuControllerSecure(NrfBleDfuController):
         
         return None
 
-    # --------------------------------------------------------------------------
-    #  Wait for a notification and parse the response
-    # --------------------------------------------------------------------------
-    async def _wait_and_parse_notify(self):
-        logger.debug('Waiting for notification')
-        notif = await self._dfu_wait_for_notify()
-
-        if notif is None:
-            raise Exception("No notification received")
-
-        result = self._dfu_parse_notify(notif)
-
-        return result
 
     async def _dfu_send_init(self):
         '''
