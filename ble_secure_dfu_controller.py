@@ -1,9 +1,6 @@
 import asyncio
 import math
-import struct
-import os
 
-from array import array
 import time
 from util import *
 
@@ -14,7 +11,7 @@ from bleak.uuids import normalize_uuid_str
 from nrf_ble_dfu_controller import NrfBleDfuController
 
 logger = logging.getLogger(__file__)
-verbose = True
+
 
 class Procedures:
     CREATE          = 0x01
@@ -105,9 +102,8 @@ class BleDfuControllerSecure(NrfBleDfuController):
         self.ctrlpt_handle = chars[self.UUID_CONTROL_POINT.upper()]
         self.data_handle = chars[self.UUID_PACKET.upper()]
 
-        if verbose:
-            print(f"Control Point Handle: {self.ctrlpt_handle}")
-            print(f"Packet Handle: {self.data_handle}")
+        logger.debug('Control Point Handle: %s', self.ctrlpt_handle)
+        logger.debug('Packet Handle: %s', self.data_handle)
 
         # Enable notifications from the Control Point characteristic
         await self._enable_notifications(self.ctrlpt_handle)
@@ -128,7 +124,7 @@ class BleDfuControllerSecure(NrfBleDfuController):
     # --------------------------------------------------------------------------
     async def check_DFU_mode(self):
         """Returns True if already in DFU mode, False otherwise"""
-        print('services = ', [s.uuid for s in self.client.services])
+        logger.debug('Services in device: %s', [s.uuid for s in self.client.services])
         for s in self.client.services:
             if s.uuid.upper() == self.UUID_DFU.upper():
                 return True
@@ -152,84 +148,53 @@ class BleDfuControllerSecure(NrfBleDfuController):
     #  Parse notification status results
     # --------------------------------------------------------------------------
 
-    def _dfu_parse_notify(self, notify: bytes):
-        if len(notify) < 3:
-            print("notify data length error")
+    def _dfu_parse_notify(self, notif: bytes):
+        if len(notif) < 3:
+            logger.error("notify data length error")
             return None
 
-        if verbose: print('RX:', notify)
+        # Packet Receipt notifications are sent in the exact same format
+        # as responses to the CALC_CHECKSUM procedure.
+        op, result = notif[0], notif[1]
+        logger.debug('RX: %s, %s=%s', notif, Procedures.to_string(op), Results.to_string(result))
 
-        dfu_notify_opcode = notify[0]
-        if dfu_notify_opcode == Procedures.RESPONSE:
+        if result != Results.SUCCESS:
+            raise Exception(f"DFU failed with result code {Results.to_string(result)}")
+        if op == Procedures.RESPONSE:
 
-            dfu_procedure = notify[1]
-            dfu_result  = notify[2]
-
-            # if verbose: print "opcode: {0}, proc: {1}, res: {2}".format(dfu_notify_opcode, procedure_str, result_str)
-            logger.info(
-                "0x%02x, proc: %s, res: %s",
-                dfu_notify_opcode, Procedures.to_string(dfu_procedure), Results.to_string(dfu_result))
-
-            # Packet Receipt notifications are sent in the exact same format
-            # as responses to the CALC_CHECKSUM procedure.
-            if(dfu_procedure == Procedures.CALC_CHECKSUM and dfu_result == Results.SUCCESS):
-                offset = bytes_to_uint32_le(notify[3:7])
-                crc32 = bytes_to_uint32_le(notify[7:11])
-
-                logger.info('CALC_CHECKSUM, res:%s, offset:%X, crc:%X', Results.to_string(dfu_result), offset, crc32)
-
-                return (dfu_procedure, dfu_result, offset, crc32)
-
-            elif(dfu_procedure == Procedures.SELECT and dfu_result == Results.SUCCESS):
-                max_size = bytes_to_uint32_le(notify[3:7])
-                offset = bytes_to_uint32_le(notify[7:11])
-                crc32 = bytes_to_uint32_le(notify[11:15])
-
-                logger.info('SELECT, res:%s, max_size:%s, offset:%X, crc:%X', Results.to_string(dfu_result), max_size, offset, crc32)
-
-                return (dfu_procedure, dfu_result, max_size, offset, crc32)
-
-            else:
-                logger.info('%s, res:%s', Procedures.to_string(dfu_procedure), Results.to_string(dfu_result))
-                return (dfu_procedure, dfu_result)
-        # op, result = notify[0], notify[1]
-        # if result != Results.SUCCESS:
-        #     raise Exception(f"DFU failed with result code {result}")
-        # if op == Procedures.RESPONSE:
-        #     if notify[2] == Procedures.SELECT:
-        #         max_size = int.from_bytes(notify[4:8], 'little')
-        #         offset = int.from_bytes(notify[8:12], 'little')
-        #         crc = int.from_bytes(notify[12:16], 'little')
-        #         return (Procedures.SELECT, Results.SUCCESS, max_size, offset, crc)
-        #     elif notify[2] == Procedures.CALC_CHECKSUM:
-        #         offset = int.from_bytes(notify[4:8], 'little')
-        #         crc = int.from_bytes(notify[8:12], 'little')
-        #         return (Procedures.CALC_CHECKSUM, Results.SUCCESS, offset, crc)
-        #     return (Procedures.RESPONSE, Results.SUCCESS)
-        # return None
+            cmd = notif[2]
+            if cmd == Procedures.SELECT:
+                max_size = int.from_bytes(notif[4:8], 'little')
+                offset = int.from_bytes(notif[8:12], 'little')
+                crc = int.from_bytes(notif[12:16], 'little')
+                return (Procedures.SELECT, Results.SUCCESS, max_size, offset, crc)
+            elif cmd == Procedures.CALC_CHECKSUM:
+                offset = int.from_bytes(notif[4:8], 'little')
+                crc = int.from_bytes(notif[8:12], 'little')
+                return (Procedures.CALC_CHECKSUM, Results.SUCCESS, offset, crc)
+            return (Procedures.RESPONSE, Results.SUCCESS)
+        
+        return None
 
     # --------------------------------------------------------------------------
     #  Wait for a notification and parse the response
     # --------------------------------------------------------------------------
     async def _wait_and_parse_notify(self):
-        if verbose: print("Waiting for notification")
-        notify = await self._dfu_wait_for_notify()
+        logger.debug('Waiting for notification')
+        notif = await self._dfu_wait_for_notify()
 
-        if notify is None:
+        if notif is None:
             raise Exception("No notification received")
 
-        result = self._dfu_parse_notify(notify)
-        if result[1] != Results.SUCCESS:
-            raise Exception("Error in {} procedure, reason: {}".format(
-                Procedures.to_string(result[0]),
-                Results.to_string(result[1])))
+        result = self._dfu_parse_notify(notif)
 
         return result
 
-    # --------------------------------------------------------------------------
-    #  Send the Init info (*.dat file contents) to peripheral device.
-    # --------------------------------------------------------------------------
     async def _dfu_send_init(self):
+        '''
+        Send the Init info (*.dat file contents) to peripheral device.
+        '''
+
         with open(self.datfile_path, 'rb') as df:
             init_bin_array = df.read()
         init_size = len(init_bin_array)
@@ -243,7 +208,7 @@ class BleDfuControllerSecure(NrfBleDfuController):
             if offset == 0 or offset > init_size:
                 # Create command
                 await self._dfu_send_command(Procedures.CREATE, [Procedures.PARAM_COMMAND] + uint32_to_bytes_le(init_size))
-                res = await self._wait_and_parse_notify()
+                await self._wait_and_parse_notify()
             segment_count = 0
             for i in range(0, init_size, self.pkt_payload_size):
                 segment = init_bin_array[i:i + self.pkt_payload_size]
@@ -251,8 +216,6 @@ class BleDfuControllerSecure(NrfBleDfuController):
                 segment_count += 1
                 if (segment_count % self.pkt_receipt_interval) == 0:
                     (proc, res, offset, crc32) = await self._wait_and_parse_notify()
-                    if res != Results.SUCCESS:
-                        raise Exception("bad notification status: {}".format(Results.to_string(res)))
 
             # Calculate CRC
             await self._dfu_send_command(Procedures.CALC_CHECKSUM)
@@ -262,13 +225,13 @@ class BleDfuControllerSecure(NrfBleDfuController):
         await self._dfu_send_command(Procedures.EXECUTE)
         await self._wait_and_parse_notify()
 
-        print("Init packet successfully transferred")
+        logger.debug('Init packet successfully transferred')
 
     # --------------------------------------------------------------------------
     #  Send the Firmware image to peripheral device.
     # --------------------------------------------------------------------------
     async def _dfu_send_image(self):
-        if verbose: print("dfu_send_image")
+        logger.debug('dfu_send_image')
 
         # Select Data Object
         await self._dfu_send_command(Procedures.SELECT, [Procedures.PARAM_DATA])
@@ -276,22 +239,24 @@ class BleDfuControllerSecure(NrfBleDfuController):
 
         # Split the firmware into multiple objects
         num_objects = int(math.ceil(self.image_size / float(max_size)))
-        print("Max object size: %d, num objects: %d, offset: %d, total size: %d" % (max_size, num_objects, offset, self.image_size))
+        logger.debug(
+            'Max object size: %d, num objects: %d, offset: %d, total size: %d',
+            max_size, num_objects, offset, self.image_size)
 
-        time_start = time.time()
+        time_start = time.monotonic()
         obj_offset = (offset // max_size) * max_size
         while obj_offset < self.image_size:
             obj_offset += await self._dfu_send_object(obj_offset, max_size)
         # Image uploaded successfully, update the progress bar
         print_progress(self.image_size, self.image_size)
 
-        duration = time.time() - time_start
-        print("\nUpload complete in {} minutes and {} seconds".format(int(duration / 60), int(duration % 60)))
+        duration = time.monotonic() - time_start
+        logger.info('Upload complete in %02d:%02ds', int(duration / 60), int(duration % 60))
 
-    # --------------------------------------------------------------------------
-    #  Send a single data object of given size and offset.
-    # --------------------------------------------------------------------------
     async def _dfu_send_object(self, offset, obj_max_size):
+        '''
+        Send a single data object of given size and offset.
+        '''
         if offset != self.image_size:
             if offset == 0 or offset >= obj_max_size or crc32 != crc32_unsigned(self.bin_array[0:offset]):
                 # Create Data Object

@@ -1,12 +1,13 @@
 import os
 import asyncio
-import re
 from abc import ABCMeta, abstractmethod
-from array import array
+import logging
+
 from bleak import BleakClient, BleakScanner, BleakGATTCharacteristic
+
 from util import *
 
-verbose = True
+logger = logging.getLogger(__name__)
 
 class NrfBleDfuController(object, metaclass=ABCMeta):
     ctrlpt_handle = None
@@ -21,7 +22,6 @@ class NrfBleDfuController(object, metaclass=ABCMeta):
         self.firmware_path = firmware_path
         self.datfile_path = datfile_path
         self.client = None
-        self.auto_switch = True
         self.notification_event = asyncio.Event()
         self.notification_data = None
 
@@ -68,7 +68,7 @@ class NrfBleDfuController(object, metaclass=ABCMeta):
     #    Bin: read binfile into bin_array
     # --------------------------------------------------------------------------
     def input_setup(self):
-        print(f"Sending file {os.path.split(self.firmware_path)[1]} to {self.target_mac}")
+        logger.info('Sending file %s to %s', os.path.split(self.firmware_path)[1], self.target_mac)
 
         if self.firmware_path is None:
             raise Exception("Input invalid")
@@ -79,15 +79,16 @@ class NrfBleDfuController(object, metaclass=ABCMeta):
             with open(self.firmware_path, 'rb') as f:
                 self.bin_array = f.read()
             self.image_size = len(self.bin_array)
-            print(f"Binary image size: {self.image_size}")
-            print(f"Binary CRC32: {crc32_unsigned(array_to_hex_string(self.bin_array))}")
+            logger.info('Binary image size: %d', self.image_size)
+            logger.info('Binary CRC32: %08X', crc32_unsigned(self.bin_array))
             return
 
         if extent == ".hex":
+            from intelhex import IntelHex
             intelhex = IntelHex(self.firmware_path)
             self.bin_array = intelhex.tobinarray()
             self.image_size = len(self.bin_array)
-            print(f"Bin array size: {self.image_size}")
+            logger.info('Bin array size: %d', self.image_size)
             return
 
         raise Exception("Input invalid")
@@ -97,10 +98,7 @@ class NrfBleDfuController(object, metaclass=ABCMeta):
     # Will return True if a connection was established, False otherwise
     # --------------------------------------------------------------------------
     async def scan_and_connect(self, timeout=10):
-        if verbose:
-            print("scan_and_connect")
-
-        print(f"Connecting to {self.target_mac}")
+        logger.info('Connecting to %s', self.target_mac)
 
         devices = await BleakScanner.discover(timeout=timeout)
         dfu_addr = uint_to_mac_string(mac_string_to_uint(self.target_mac) + 1)
@@ -109,19 +107,17 @@ class NrfBleDfuController(object, metaclass=ABCMeta):
                 self.client = BleakClient(self.target_mac)
                 await self.client.connect()
                 await self._on_connected()
-                if verbose:
-                    print(f"Connected to {self.target_mac}")
+                logger.debug('Connected to %s', self.target_mac)
                 return True
             if device.address == dfu_addr:
                 self.client = BleakClient(dfu_addr)
                 await self.client.connect()
                 await self._on_connected()
-                if verbose:
-                    print(f"Connected to {dfu_addr}")
+                logger.debug('Connected to %s', dfu_addr)
                 return True
 
 
-        print(f"Device {self.target_mac} not found")
+        logger.warning(f"Device {self.target_mac} not found")
         return False
 
     # --------------------------------------------------------------------------
@@ -130,8 +126,7 @@ class NrfBleDfuController(object, metaclass=ABCMeta):
     async def disconnect(self):
         if self.client and self.client.is_connected:
             await self.client.disconnect()
-            if verbose:
-                print(f"Disconnected from {self.target_mac}")
+            logger.debug('Disconnected from %s', self.target_mac)
 
     async def target_mac_increase(self, inc):
         await self.disconnect()
@@ -145,8 +140,7 @@ class NrfBleDfuController(object, metaclass=ABCMeta):
     #  Wait for notification to arrive.
     # --------------------------------------------------------------------------
     async def _dfu_wait_for_notify(self):
-        if verbose:
-            print("dfu_wait_for_notify")
+        logger.debug("dfu_wait_for_notify")
 
         # bleak handles notifications asynchronously, so this method would
         # need to wait for the notification handler to process the data.
@@ -160,8 +154,7 @@ class NrfBleDfuController(object, metaclass=ABCMeta):
     async def _dfu_send_command(self, procedure, params=[]):
 
         command = bytes([procedure] + params)
-        if verbose:
-            print('_dfu_send_command %s', command)
+        logger.debug('_dfu_send_command %s', command)
 
         await self.client.write_gatt_char(self.ctrlpt_handle, command)
 
@@ -177,15 +170,13 @@ class NrfBleDfuController(object, metaclass=ABCMeta):
     # --------------------------------------------------------------------------
     #  Enable notifications from Characteristic
     # --------------------------------------------------------------------------
-    async def _enable_notifications(self, ch: BleakGATTCharacteristic):
-        if verbose:
-            print('_enable_notifications')
+    async def _enable_notifications(self, char: BleakGATTCharacteristic):
+        logger.debug('_enable_notifications')
 
-        await self.client.start_notify(ch, self._notification_handler)
+        await self.client.start_notify(char, self._notification_handler)
 
     def _notification_handler(self, sender, data):
-        if verbose:
-            print(f"Notification received from {sender}: {data}")
+        logger.debug('Notification received from %s: %s', sender, data)
         # store data in the class and use asyncio Event to notify
         self.notification_data = data
         self.notification_event.set()

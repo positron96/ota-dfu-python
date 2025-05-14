@@ -6,8 +6,6 @@ Conforms to nRF51_SDK 11.0 BLE_DFU requirements.
 """
 import os
 import argparse
-import time
-import math
 import traceback
 import asyncio
 import logging
@@ -16,6 +14,8 @@ from unpacker import Unpacker
 
 from ble_secure_dfu_controller import BleDfuControllerSecure
 from ble_legacy_dfu_controller import BleDfuControllerLegacy
+
+logger = logging.getLogger(__name__)
 
 async def main():
 
@@ -79,7 +79,7 @@ async def main():
 
         if options.zipfile:
             if options.hexfile or options.datfile:
-                print("Cannot use ZIP file with HEX or DAT file.")
+                logger.error("Cannot use ZIP file with HEX or DAT file.")
                 parser.print_usage()
                 exit(2)
 
@@ -87,22 +87,20 @@ async def main():
             try:
                 hexfile, datfile = unpacker.unpack_zipfile(options.zipfile)
             except Exception as e:
-                print("ERR")
-                print(e)
-                pass
+                logger.error('Error unpacking ZIP file', exc_info=True)
 
         else:
             if not options.hexfile or not options.datfile:
-                print('HEX file and DAT file are needed.')
+                logger.error('HEX file and DAT file are needed.')
                 parser.print_help()
                 exit(2)
 
             if not os.path.isfile(options.hexfile):
-                print("Error: HEX file doesn't exist")
+                logger.error("Error: HEX file doesn't exist")
                 exit(2)
 
             if not os.path.isfile(options.datfile):
-                print("Error: DAT file doesn't exist")
+                logger.error("Error: DAT file doesn't exist")
                 exit(2)
 
             hexfile = options.hexfile
@@ -114,8 +112,6 @@ async def main():
         else:
             ble_dfu = BleDfuControllerLegacy(options.address.upper(), hexfile, datfile)
 
-        ble_dfu.auto_switch = options.auto_switch
-
         # Initialize inputs
         ble_dfu.input_setup()
 
@@ -123,18 +119,18 @@ async def main():
         if await ble_dfu.scan_and_connect():
             if not await ble_dfu.check_DFU_mode():
                 if not options.auto_switch:
-                    print('Not in DFU mode')
+                    logger.info('Device not in DFU mode')
                     return
-                print("Need to switch to DFU mode")
+                logger.info("Need to switch to DFU mode")                
                 success = await ble_dfu.switch_to_dfu_mode()
                 if not success:
-                    print("Couldn't reconnect")
+                    logger.error("Couldn't reconnect")
         else:
             # The device might already be in DFU mode (MAC + 1)
             await ble_dfu.target_mac_increase(1)
 
             # Try connection with new address
-            print("Couldn't connect, will try DFU MAC")
+            logger.info("Couldn't connect, will try DFU MAC")
             if not await ble_dfu.scan_and_connect():
                 raise Exception("Can't connect to device")
 
@@ -144,14 +140,13 @@ async def main():
         await ble_dfu.disconnect()
 
     except Exception as e:
-        print(f"Exception at line {traceback.format_exc()}: {e}")
+        logger.exception('Error during DFU process')
     finally:
         # If Unpacker for zipfile used then delete Unpacker
         if unpacker is not None:
             unpacker.delete()
 
-        if options.verbose:
-            print("DFU Server done")
+        logger.debug('DFU Server done')
 
 
 if __name__ == '__main__':
